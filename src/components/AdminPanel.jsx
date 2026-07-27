@@ -53,6 +53,12 @@ function AdminPanel({ user, onLogout, apiUrl }) {
   const [hoursSearchQuery, setHoursSearchQuery] = useState('');
   const [hoursConditionFilter, setHoursConditionFilter] = useState('TODOS');
 
+  // --- FILTROS POR SELECCIÓN DE EMPLEADOS ---
+  const [selectedEmployeesForHours, setSelectedEmployeesForHours] = useState([]);
+  const [showEmployeeSelector, setShowEmployeeSelector] = useState(false);
+  const [selectedEmployeesForRecords, setSelectedEmployeesForRecords] = useState([]);
+  const [showRecordEmployeeSelector, setShowRecordEmployeeSelector] = useState(false);
+
   // --- ESTADO PARA MODAL DE EDICIÓN DE HORARIO ---
   const [showScheduleModal, setShowScheduleModal] = useState(false);
   const [editingEmployeeForSchedule, setEditingEmployeeForSchedule] = useState(null);
@@ -77,7 +83,7 @@ function AdminPanel({ user, onLogout, apiUrl }) {
     endDate: '',
   });
 
-  // --- ESTADOS PARA ASIGNAR NUEVAS VACACIONES (desde el modal) ---
+  // --- ESTADOS PARA ASIGNAR NUEVAS VACACIONES ---
   const [showNewVacationForm, setShowNewVacationForm] = useState(false);
   const [newVacationStart, setNewVacationStart] = useState('');
   const [newVacationEnd, setNewVacationEnd] = useState('');
@@ -87,7 +93,7 @@ function AdminPanel({ user, onLogout, apiUrl }) {
   const [editingEmployee, setEditingEmployee] = useState(null);
   const [isAddingEmployee, setIsAddingEmployee] = useState(false);
   
-  // --- ESTADO PARA VER CONTRASEÑA (requiere validación de admin) ---
+  // --- ESTADO PARA VER CONTRASEÑA ---
   const [showPinForEmployee, setShowPinForEmployee] = useState(null);
   const [adminPinInput, setAdminPinInput] = useState('');
   const [showAdminPinDialog, setShowAdminPinDialog] = useState(false);
@@ -111,6 +117,50 @@ function AdminPanel({ user, onLogout, apiUrl }) {
       [recordId]: !prev[recordId]
     }));
   }, []);
+
+  const decimalToHoursMinutes = (decimalHours) => {
+    if (decimalHours === undefined || decimalHours === null || isNaN(decimalHours)) return '0:00';
+    const hours = Math.floor(decimalHours);
+    const minutes = Math.round((decimalHours - hours) * 60);
+    return `${hours}:${String(minutes).padStart(2, '0')}`;
+  };
+
+  const esDiaDescanso = useCallback((employeeId, fechaStr) => {
+    if (!employeeId || !fechaStr) return false;
+    
+    const targetEmp = employeesList.find(e => String(e.id).toUpperCase() === String(employeeId).toUpperCase());
+    if (!targetEmp) return false;
+    
+    try {
+      const parts = fechaStr.split(/[-/]/);
+      let year, month, day;
+      if (parts[0].length === 4) {
+        [year, month, day] = parts;
+      } else {
+        [day, month, year] = parts;
+      }
+      const recordDate = new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
+      if (isNaN(recordDate.getTime())) return false;
+      
+      const diaSemana = recordDate.getDay();
+      let horarioDia = '';
+      
+      switch(diaSemana) {
+        case 0: horarioDia = targetEmp.rawDom || 'DESCANSO'; break;
+        case 1: horarioDia = targetEmp.rawLun || 'DESCANSO'; break;
+        case 2: horarioDia = targetEmp.rawMar || 'DESCANSO'; break;
+        case 3: horarioDia = targetEmp.rawMie || 'DESCANSO'; break;
+        case 4: horarioDia = targetEmp.rawJue || 'DESCANSO'; break;
+        case 5: horarioDia = targetEmp.rawVie || 'DESCANSO'; break;
+        case 6: horarioDia = targetEmp.rawSab || 'DESCANSO'; break;
+        default: return false;
+      }
+      
+      return !horarioDia || horarioDia.toUpperCase().includes('DESCANSO') || horarioDia === '-';
+    } catch (e) {
+      return false;
+    }
+  }, [employeesList]);
 
   const formatShortModifiedDate = (dateStr) => {
     if (!dateStr) return 'Sin registros previos';
@@ -167,6 +217,51 @@ function AdminPanel({ user, onLogout, apiUrl }) {
   };
 
   // ============================================================
+  // FUNCIONES PARA SELECCIÓN DE EMPLEADOS
+  // ============================================================
+  const nonAdminEmployees = useMemo(() => {
+    return employeesList.filter(emp => emp.role !== 'ADMIN');
+  }, [employeesList]);
+
+  const toggleEmployeeSelection = (employeeId) => {
+    setSelectedEmployeesForHours(prev => {
+      if (prev.includes(employeeId)) {
+        return prev.filter(id => id !== employeeId);
+      } else {
+        return [...prev, employeeId];
+      }
+    });
+  };
+
+  const toggleAllEmployees = () => {
+    const allIds = nonAdminEmployees.map(emp => emp.id);
+    if (selectedEmployeesForHours.length === allIds.length && allIds.length > 0) {
+      setSelectedEmployeesForHours([]);
+    } else {
+      setSelectedEmployeesForHours(allIds);
+    }
+  };
+
+  const toggleRecordEmployeeSelection = (employeeId) => {
+    setSelectedEmployeesForRecords(prev => {
+      if (prev.includes(employeeId)) {
+        return prev.filter(id => id !== employeeId);
+      } else {
+        return [...prev, employeeId];
+      }
+    });
+  };
+
+  const toggleAllRecordEmployees = () => {
+    const allIds = nonAdminEmployees.map(emp => emp.id);
+    if (selectedEmployeesForRecords.length === allIds.length && allIds.length > 0) {
+      setSelectedEmployeesForRecords([]);
+    } else {
+      setSelectedEmployeesForRecords(allIds);
+    }
+  };
+
+  // ============================================================
   // FUNCIÓN PRINCIPAL OPTIMIZADA PARA OBTENER DATOS
   // ============================================================
   const fetchAdminData = useCallback(async (page = currentPage, preservePage = false, showMessage = true) => {
@@ -174,13 +269,11 @@ function AdminPanel({ user, onLogout, apiUrl }) {
     setIsRefreshing(true);
     
     try {
-      // Construir parámetros para la API optimizada
       const params = new URLSearchParams();
       params.append('action', 'GET_ADMIN_DATA_OPTIMIZED');
       params.append('page', page);
       params.append('limit', recordsPerPage);
       
-      // Filtros
       if (activeTab !== 'GENERAL' && activeTab !== 'PERSONAL' && activeTab !== 'HORAS') {
         params.append('store', activeTab);
       }
@@ -203,7 +296,6 @@ function AdminPanel({ user, onLogout, apiUrl }) {
       const resData = await response.json();
 
       if (resData.success) {
-        // Actualizar registros paginados
         setAllRecords(resData.records || []);
         setTotalRecords(resData.totalRecords || 0);
         setTotalPages(resData.totalPages || 1);
@@ -212,7 +304,6 @@ function AdminPanel({ user, onLogout, apiUrl }) {
           setCurrentPage(resData.currentPage || 1);
         }
 
-        // Actualizar lista de empleados
         if (resData.employees) {
           const processedEmployees = resData.employees.map(emp => {
             let activeVacation = null;
@@ -261,7 +352,6 @@ function AdminPanel({ user, onLogout, apiUrl }) {
           setEmployeesList(processedEmployees);
         }
 
-        // Solo mostrar mensaje si showMessage es true
         if (showMessage) {
           setStatusMessage({
             text: 'Datos sincronizados correctamente',
@@ -284,7 +374,7 @@ function AdminPanel({ user, onLogout, apiUrl }) {
   }, [apiUrl, activeTab, searchQuery, movementFilter, dateMode, singleDate, startDate, endDate, currentPage, recordsPerPage]);
 
   // ============================================================
-  // FUNCIÓN PARA CARGAR CONTROL DE HORAS (OPTIMIZADA)
+  // FUNCIÓN PARA CARGAR CONTROL DE HORAS
   // ============================================================
   const loadHoursReport = useCallback(async () => {
     setLoadingHoras(true);
@@ -310,6 +400,103 @@ function AdminPanel({ user, onLogout, apiUrl }) {
       setLoadingHoras(false);
     }
   }, [apiUrl, semanaSeleccionada, employeesList]);
+
+  // ============================================================
+  // FILTROS DE REGISTROS (Bitácora)
+  // ============================================================
+  const filteredRecords = useMemo(() => {
+    return allRecords.filter(rec => {
+      const recStore = getValueByStrategy(rec, ["Sucursal", "store"], 5, 'PENIEL').toUpperCase();
+      const empName = getValueByStrategy(rec, ["NombreReal", "Empleado", "Nombre"], 0, 'Sin Identificar').toLowerCase();
+
+      let empId = "";
+      if (rec["ID Empleado"]) {
+        empId = String(rec["ID Empleado"]).trim();
+      } else if (rec["ID_Empleado"]) {
+        empId = String(rec["ID_Empleado"]).trim();
+      } else if (rec["Empleado ID"]) {
+        empId = String(rec["Empleado ID"]).trim();
+      } else if (rec["id"]) {
+        empId = String(rec["id"]).trim();
+      } else {
+        empId = getValueByStrategy(rec, [], 1, '').trim();
+      }
+
+      const recMov = getValueByStrategy(rec, ["Movimiento", "movimiento"], 4, '').toUpperCase().replace(/[\s_\-]/g, '');
+      const recDateRaw = getValueByStrategy(rec, ["Fecha", "fecha"], 2, '');
+
+      if (activeTab !== 'GENERAL' && activeTab !== 'PERSONAL' && activeTab !== 'HORAS' && recStore !== activeTab) return false;
+
+      if (activeTab !== 'GENERAL' && activeTab !== 'PERSONAL' && activeTab !== 'HORAS') {
+        const empInfo = employeesList.find(e => e.id?.toUpperCase() === empId?.toUpperCase());
+        if (empInfo && empInfo.role === 'ADMIN') return false;
+      }
+
+      if (selectedEmployeesForRecords.length > 0) {
+        const empIdUpper = empId.toUpperCase();
+        const selectedUpper = selectedEmployeesForRecords.map(id => id.toUpperCase().trim());
+        if (!selectedUpper.includes(empIdUpper)) {
+          return false;
+        }
+      }
+
+      const query = searchQuery.toLowerCase().trim();
+      if (query && !empName.includes(query) && !empId.toLowerCase().includes(query)) return false;
+
+      if (movementFilter !== 'TODOS') {
+        const normalizedFilter = movementFilter.replace(/[\s_\-]/g, '').toUpperCase();
+        if (recMov !== normalizedFilter) return false;
+      }
+
+      const recordDateObj = parseStringToLocalDate(recDateRaw);
+      if (!recordDateObj) return true;
+
+      if (dateMode === 'SINGLE') {
+        if (!singleDate) return true;
+        const targetDateObj = parseStringToLocalDate(singleDate);
+        return recordDateObj.getTime() === targetDateObj.getTime();
+      } else if (dateMode === 'RANGE') {
+        if (!startDate || !endDate) return true;
+        const startObj = parseStringToLocalDate(startDate);
+        const endObj = parseStringToLocalDate(endDate);
+        return recordDateObj >= startObj && recordDateObj <= endObj;
+      }
+      return true;
+    });
+  }, [allRecords, searchQuery, movementFilter, activeTab, dateMode, singleDate, startDate, endDate, employeesList, selectedEmployeesForRecords]);
+
+  // ============================================================
+  // FILTRO DE HORAS REPORTE CON SELECCIÓN DE EMPLEADOS
+  // ============================================================
+  const filteredHoursReportWithSelection = useMemo(() => {
+    let filtered = reporteHoras.filter(emp => {
+      const q = hoursSearchQuery.toLowerCase().trim();
+      const matchesQuery = q ? (emp.name?.toLowerCase().includes(q) || emp.id?.toLowerCase().includes(q)) : true;
+
+      if (!matchesQuery) return false;
+
+      if (hoursConditionFilter === 'SOLO_EXTRA') {
+        return emp.balanceEstatus === 'EXTRA' && emp.horasExtra > 0;
+      }
+      if (hoursConditionFilter === 'SOLO_FALTANTE') {
+        return emp.balanceEstatus === 'FALTANTE' && emp.horasFaltantes > 0;
+      }
+      if (hoursConditionFilter === 'EXACTO') {
+        return emp.horasExtra === 0 && emp.horasFaltantes === 0;
+      }
+      return true;
+    });
+
+    if (selectedEmployeesForHours.length > 0) {
+      const selectedUpper = selectedEmployeesForHours.map(id => id.toUpperCase());
+      filtered = filtered.filter(emp => {
+        const empIdUpper = emp.id?.toUpperCase() || '';
+        return selectedUpper.includes(empIdUpper);
+      });
+    }
+
+    return filtered;
+  }, [reporteHoras, hoursSearchQuery, hoursConditionFilter, selectedEmployeesForHours]);
 
   // ============================================================
   // FUNCIONES PARA EL MODAL DE VACACIONES
@@ -724,7 +911,7 @@ function AdminPanel({ user, onLogout, apiUrl }) {
   };
 
   // ============================================================
-  // FUNCIONES PARA VER CONTRASEÑA CON VALIDACIÓN DE ADMIN
+  // FUNCIONES PARA VER CONTRASEÑA
   // ============================================================
   const handleShowPin = (employee) => {
     setPendingEmployeeForPin(employee);
@@ -780,44 +967,56 @@ function AdminPanel({ user, onLogout, apiUrl }) {
     setPendingEmployeeForPin(null);
   };
 
-  // ============================================================
-  // FUNCION PARA VERIFICAR RETARDO
-  // ============================================================
-  const checkIsLate = useCallback((recordTimeStr, employeeId, recordDateStr) => {
-    if (!recordTimeStr || recordTimeStr === '--:--' || !employeeId || !recordDateStr) return false;
+// ============================================================
+// FUNCION PARA VERIFICAR RETARDO - TOLERANCIA DE 10 MINUTOS
+// ============================================================
+const checkIsLate = useCallback((recordTimeStr, employeeId, recordDateStr) => {
+  if (!recordTimeStr || recordTimeStr === '--:--' || !employeeId || !recordDateStr) return false;
 
-    const targetEmp = employeesList.find(e => String(e.id).toUpperCase() === String(employeeId).toUpperCase());
-    if (!targetEmp) return false;
+  const targetEmp = employeesList.find(e => String(e.id).toUpperCase() === String(employeeId).toUpperCase());
+  if (!targetEmp) return false;
 
-    const recordDateObj = parseStringToLocalDate(recordDateStr);
-    if (!recordDateObj) return false;
+  const recordDateObj = parseStringToLocalDate(recordDateStr);
+  if (!recordDateObj) return false;
 
-    const diasSemanaCampos = ['rawDom', 'rawLun', 'rawMar', 'rawMie', 'rawJue', 'rawVie', 'rawSab'];
-    const diaPropiedad = diasSemanaCampos[recordDateObj.getDay()];
-    const horarioDiaString = targetEmp[diaPropiedad];
+  const diasSemanaCampos = ['rawDom', 'rawLun', 'rawMar', 'rawMie', 'rawJue', 'rawVie', 'rawSab'];
+  const diaPropiedad = diasSemanaCampos[recordDateObj.getDay()];
+  const horarioDiaString = targetEmp[diaPropiedad];
 
-    if (!horarioDiaString || horarioDiaString.toUpperCase().includes('DESCANSO') || horarioDiaString === '-') return false;
+  // Si es día de descanso, no aplicar retardo
+  if (!horarioDiaString || horarioDiaString.toUpperCase().includes('DESCANSO') || horarioDiaString === '-') return false;
 
-    const fontHoraPermitidaStr = horarioDiaString.split('-')[0].trim();
+  const fontHoraPermitidaStr = horarioDiaString.split('-')[0].trim();
+  
+  // Si no se puede extraer la hora, no aplicar retardo
+  if (!fontHoraPermitidaStr || !fontHoraPermitidaStr.includes(':')) return false;
 
-    const timeToMinutes = (str) => {
-      const parts = str.split(':');
-      if (parts.length < 2) return 0;
-      return (parseInt(parts[0], 10) * 60) + parseInt(parts[1], 10);
-    };
+  const timeToMinutes = (str) => {
+    if (!str || !str.includes(':')) return 0;
+    const parts = str.split(':');
+    return (parseInt(parts[0], 10) * 60) + parseInt(parts[1], 10);
+  };
 
-    const minutesOfRecord = timeToMinutes(recordTimeStr);
-    const minutesLimitAllowed = timeToMinutes(fontHoraPermitidaStr);
+  const minutesOfRecord = timeToMinutes(recordTimeStr);
+  const minutesLimitAllowed = timeToMinutes(fontHoraPermitidaStr);
 
-    return minutesOfRecord > (minutesLimitAllowed + 15);
-  }, [employeesList]);
-
-  // ============================================================
-  // FILTRAR EMPLEADOS NO ADMIN PARA MÉTRICAS
-  // ============================================================
-  const nonAdminEmployees = useMemo(() => {
-    return employeesList.filter(emp => emp.role !== 'ADMIN');
-  }, [employeesList]);
+  // Si la hora del registro es mayor a la hora permitida + 10 minutos => RETARDO
+  const resultado = minutesOfRecord > (minutesLimitAllowed + 10);
+  
+  // DEBUG: Descomentar para verificar
+  // console.log('🔍 Verificando retardo:', {
+  //   empleado: targetEmp.name,
+  //   fecha: recordDateStr,
+  //   horaRegistro: recordTimeStr,
+  //   horaPermitida: fontHoraPermitidaStr,
+  //   minutosRegistro: minutesOfRecord,
+  //   minutosPermitidos: minutesLimitAllowed,
+  //   tolerancia: 10,
+  //   esRetardo: resultado
+  // });
+  
+  return resultado;
+}, [employeesList]);
 
   // ============================================================
   // EFECTOS Y HOOKS
@@ -839,25 +1038,24 @@ function AdminPanel({ user, onLogout, apiUrl }) {
     cargarHistoricoSemanas();
   }, [activeTab, apiUrl]);
 
-  // Cargar reporte de horas - Optimizado
   useEffect(() => {
     if (activeTab !== 'HORAS') return;
     loadHoursReport();
   }, [activeTab, semanaSeleccionada, loadHoursReport]);
 
-  // Carga inicial - SIN mensaje automático
+  // Carga inicial
   useEffect(() => {
     fetchAdminData(1, false, false);
   }, []);
 
-  // Cambio de página - SIN mensaje automático
+  // Cambio de página
   useEffect(() => {
     if (currentPage > 1) {
       fetchAdminData(currentPage, true, false);
     }
   }, [currentPage]);
 
-  // Cambio de filtros - SIN mensaje automático
+  // Cambio de filtros
   useEffect(() => {
     setCurrentPage(1);
     fetchAdminData(1, false, false);
@@ -872,12 +1070,8 @@ function AdminPanel({ user, onLogout, apiUrl }) {
   }, [qrStoreTarget]);
 
   // ============================================================
-  // FILTRADO EN MEMORIA (para la vista actual de la página)
+  // OBTENER PERSONAL LABORANDO HOY
   // ============================================================
-  const currentRecordsToDisplay = useMemo(() => {
-    return allRecords;
-  }, [allRecords]);
-
   const obtenerPersonalLaborandoHoy = useCallback(() => {
     const hoy = new Date();
     const dia = String(hoy.getDate()).padStart(2, '0');
@@ -927,14 +1121,14 @@ function AdminPanel({ user, onLogout, apiUrl }) {
   // FUNCIONES DE EXPORTACION PDF
   // ============================================================
   const handleExportToPDF = () => {
-    if (allRecords.length === 0) {
+    if (filteredRecords.length === 0) {
       alert("No hay registros en la vista actual para exportar.");
       return;
     }
 
     const printWindow = window.open('', '_blank');
 
-    const tableRowsHtml = allRecords.map((rec) => {
+    const tableRowsHtml = filteredRecords.map((rec) => {
       const empIdValue = getValueByStrategy(rec, ["ID Empleado", "ID_Empleado", "Empleado ID"], 1, 'N/A');
       const targetEmpObj = employeesList.find(e => String(e.id).toUpperCase() === String(empIdValue).toUpperCase());
       const empName = targetEmpObj ? targetEmpObj.name : 'Personal Activo';
@@ -942,6 +1136,7 @@ function AdminPanel({ user, onLogout, apiUrl }) {
       const movement = getValueByStrategy(rec, ["Movimiento", "movimiento"], 4, 'ENTRADA');
       const date = getValueByStrategy(rec, ["Fecha", "fecha"], 2, '--/--/----');
       const time = getValueByStrategy(rec, ["Hora", "hora"], 3, '--:--');
+      const esDescanso = esDiaDescanso(empIdValue, date);
 
       const comment = getValueByStrategy(rec, ["Justificacion", "justificacion", "Justificación"], 8, '');
       const modPropValue = getValueByStrategy(rec, ["Modificacion", "Modificación"], 6, 'FALSE');
@@ -954,6 +1149,7 @@ function AdminPanel({ user, onLogout, apiUrl }) {
           <td>
             <div style="font-weight: bold; color: #111;">${empName}</div>
             <div style="font-size: 10px; color: #666; font-family: monospace;">ID: ${empIdValue}</div>
+            ${esDescanso ? `<div style="font-size: 8px; color: #9333ea; font-weight: bold; margin-top: 2px;">DESCANSO TRABAJADO</div>` : ''}
           </td>
           <td style="font-family: monospace; font-weight: bold; text-transform: uppercase; color: #444;">${store}</td>
           <td>
@@ -975,7 +1171,7 @@ function AdminPanel({ user, onLogout, apiUrl }) {
 
     const filtroFechaText = dateMode === 'SINGLE' ? `Día: ${singleDate}` : `Rango: ${startDate} al ${endDate}`;
 
-    printWindow.document.write(plotPdfLayout(activeTab, filtroFechaText, allRecords.length, tableRowsHtml));
+    printWindow.document.write(plotPdfLayout(activeTab, filtroFechaText, filteredRecords.length, tableRowsHtml));
     printWindow.document.close();
   };
 
@@ -1040,20 +1236,20 @@ function AdminPanel({ user, onLogout, apiUrl }) {
   `;
 
   const handleExportWeeklyHoursToPDF = () => {
-    if (filteredHoursReport.length === 0) {
+    if (filteredHoursReportWithSelection.length === 0) {
       alert("No hay cálculos consolidados en esta vista para exportar.");
       return;
     }
 
     const printWindow = window.open('', '_blank');
 
-    const tableRowsHtml = filteredHoursReport.map((emp) => {
+    const tableRowsHtml = filteredHoursReportWithSelection.map((emp) => {
       let badgeStyle = 'background-color: #f0fdf4; color: #166534; border: 1px solid #bbf7d0;';
-      let statusText = `+${emp.horasExtra} hrs Extra`;
+      let statusText = `+${decimalToHoursMinutes(emp.horasExtra)} hrs Extra`;
 
       if (emp.balanceEstatus === 'FALTANTE') {
         badgeStyle = 'background-color: #fef2f2; color: #991b1b; border: 1px solid #fecaca;';
-        statusText = `-${emp.horasFaltantes} hrs Faltan`;
+        statusText = `-${decimalToHoursMinutes(emp.horasFaltantes)} hrs Faltan`;
       } else if (emp.horasExtra === 0 && emp.horasFaltantes === 0) {
         badgeStyle = 'background-color: #fffbeb; color: #92400e; border: 1px solid #fef3c7;';
         statusText = 'Jornada Exacta';
@@ -1063,8 +1259,8 @@ function AdminPanel({ user, onLogout, apiUrl }) {
         <tr>
           <td style="font-family: monospace; font-weight: bold; color: #444; font-size: 11px;">${emp.id}</td>
           <td style="font-weight: bold; color: #111; font-size: 12px;">${emp.name}</td>
-          <td style="font-family: monospace; text-align: center; color: #444;">${emp.horasEsperadas} hrs</td>
-          <td style="font-family: monospace; text-align: center; font-weight: bold; color: #111;">${emp.horasReales} hrs</td>
+          <td style="font-family: monospace; text-align: center; color: #444;">${decimalToHoursMinutes(emp.horasEsperadas)}</td>
+          <td style="font-family: monospace; text-align: center; font-weight: bold; color: #111;">${decimalToHoursMinutes(emp.horasReales)}</td>
           <td style="text-align: center;">
             <span class="badge" style="${badgeStyle}">
               ${statusText.toUpperCase()}
@@ -1082,6 +1278,10 @@ function AdminPanel({ user, onLogout, apiUrl }) {
       EXACTO: 'SOLO JORNADAS EXACTAS'
     }[hoursConditionFilter];
 
+    const empleadosSeleccionadosText = selectedEmployeesForHours.length > 0 
+      ? `${selectedEmployeesForHours.length} empleados seleccionados` 
+      : 'Todos los empleados';
+
     printWindow.document.write(`
       <html>
         <head>
@@ -1091,7 +1291,7 @@ function AdminPanel({ user, onLogout, apiUrl }) {
             body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color: #222; margin: 0; padding: 0; font-size: 11px; line-height: 1.5; }
             .header { border-bottom: 3px solid #ea580c; padding-bottom: 12px; margin-bottom: 18px; display: flex; justify-content: space-between; align-items: flex-end; }
             .title { font-size: 18px; font-weight: bold; color: #111; text-transform: uppercase; letter-spacing: 0.5px; }
-            .meta-box { background-color: #f4f4f5; border: 1px solid #e4e4e7; padding: 10px 14px; border-radius: 6px; margin-bottom: 20px; display: flex; gap: 24px; }
+            .meta-box { background-color: #f4f4f5; border: 1px solid #e4e4e7; padding: 10px 14px; border-radius: 6px; margin-bottom: 20px; display: flex; gap: 24px; flex-wrap: wrap; }
             .meta-item { font-size: 10px; font-weight: bold; text-transform: uppercase; color: #71717a; }
             .meta-item span { color: #111; font-family: monospace; font-size: 11px; display: block; margin-top: 2px; }
             table { width: 100%; border-collapse: collapse; text-align: left; margin-top: 5px; }
@@ -1113,7 +1313,8 @@ function AdminPanel({ user, onLogout, apiUrl }) {
           <div class="meta-box">
             <div class="meta-item">Rango de Corte: <span style="font-weight: bold; color: #ea580c;">${periodoText}</span></div>
             <div class="meta-item">Filtro Condición: <span>${condicionText}</span></div>
-            <div class="meta-item">Empleados en Lista: <span>${filteredHoursReport.length}</span></div>
+            <div class="meta-item">Empleados: <span>${empleadosSeleccionadosText}</span></div>
+            <div class="meta-item">Total en Lista: <span>${filteredHoursReportWithSelection.length}</span></div>
           </div>
           <table>
             <thead>
@@ -1691,29 +1892,6 @@ function AdminPanel({ user, onLogout, apiUrl }) {
   };
 
   // ============================================================
-  // FILTRO DE HORAS REPORTE
-  // ============================================================
-  const filteredHoursReport = useMemo(() => {
-    return reporteHoras.filter(emp => {
-      const q = hoursSearchQuery.toLowerCase().trim();
-      const matchesQuery = q ? (emp.name.toLowerCase().includes(q) || emp.id.toLowerCase().includes(q)) : true;
-
-      if (!matchesQuery) return false;
-
-      if (hoursConditionFilter === 'SOLO_EXTRA') {
-        return emp.balanceEstatus === 'EXTRA' && emp.horasExtra > 0;
-      }
-      if (hoursConditionFilter === 'SOLO_FALTANTE') {
-        return emp.balanceEstatus === 'FALTANTE' && emp.horasFaltantes > 0;
-      }
-      if (hoursConditionFilter === 'EXACTO') {
-        return emp.horasExtra === 0 && emp.horasFaltantes === 0;
-      }
-      return true;
-    });
-  }, [reporteHoras, hoursSearchQuery, hoursConditionFilter]);
-
-  // ============================================================
   // RENDER PRINCIPAL
   // ============================================================
   const personalLaborandoHoy = obtenerPersonalLaborandoHoy();
@@ -1758,7 +1936,6 @@ function AdminPanel({ user, onLogout, apiUrl }) {
               onClick={() => { 
                 setActiveTab(tab); 
                 setStatusMessage({ text: '', isError: false });
-                // Forzar carga de horas si es la pestaña de HORAS
                 if (tab === 'HORAS') {
                   setLoadingHoras(true);
                 }
@@ -1772,7 +1949,7 @@ function AdminPanel({ user, onLogout, apiUrl }) {
           ))}
         </nav>
 
-        {/* FEEDBACK - Solo se muestra cuando hay mensaje */}
+        {/* FEEDBACK */}
         {statusMessage.text && (
           <div className={`p-4 rounded-lg text-xs font-bold uppercase tracking-wide border ${statusMessage.isError ? 'bg-zinc-950 border-red-900 text-red-400' : 'bg-zinc-950 border-emerald-800 text-emerald-400'}`}>
             {statusMessage.text}
@@ -1880,16 +2057,14 @@ function AdminPanel({ user, onLogout, apiUrl }) {
             </div>
           </main>
         ) : activeTab === 'HORAS' ? (
-          // ==========================================================
-          // PESTAÑA: CONTROL DE HORAS
-          // ==========================================================
           <main className="space-y-6">
             <div className="bg-zinc-900 p-6 rounded-xl border border-zinc-800 shadow-xl space-y-4">
               <div className="border-b border-zinc-800 pb-3 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
                 <div>
                   <h2 className="text-sm font-bold text-white uppercase tracking-wider">Balances de Tiempo Laboral Semanal</h2>
+                  <p className="text-xs text-zinc-400 mt-0.5">Ciclo semanal: Domingo a Sabado. El cierre se realiza automaticamente los domingos.</p>
                 </div>
-                {!loadingHoras && filteredHoursReport.length > 0 && (
+                {!loadingHoras && filteredHoursReportWithSelection.length > 0 && (
                   <button
                     onClick={handleExportWeeklyHoursToPDF}
                     className="flex items-center gap-2 px-4 py-2 bg-zinc-950 hover:bg-zinc-800 text-orange-400 hover:text-orange-300 border border-orange-900/60 rounded-lg text-xs font-bold transition-all uppercase tracking-wider shadow-inner"
@@ -1956,12 +2131,74 @@ function AdminPanel({ user, onLogout, apiUrl }) {
                 </div>
               </div>
 
+              {/* Selector de empleados para Control de Horas */}
+              <div className="bg-zinc-950 p-4 rounded-lg border border-zinc-800/60">
+                <div className="flex flex-col gap-1">
+                  <label className="text-[10px] font-bold tracking-wider text-zinc-500 uppercase">
+                    4. Seleccionar Empleados
+                  </label>
+                  <button
+                    onClick={() => setShowEmployeeSelector(!showEmployeeSelector)}
+                    className="bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-white hover:border-orange-500 transition-colors flex items-center justify-between"
+                  >
+                    <span>
+                      {selectedEmployeesForHours.length === 0 
+                        ? 'Todos los empleados' 
+                        : `${selectedEmployeesForHours.length} seleccionados`}
+                    </span>
+                    <span className="text-zinc-500">{showEmployeeSelector ? '▲' : '▼'}</span>
+                  </button>
+                  
+                  {showEmployeeSelector && (
+                    <div className="relative">
+                      <div className="absolute z-20 mt-1 w-full bg-zinc-900 border border-zinc-800 rounded-lg p-3 max-h-60 overflow-y-auto space-y-1 shadow-xl">
+                        <div className="flex items-center gap-2 pb-2 border-b border-zinc-800 sticky top-0 bg-zinc-900">
+                          <input
+                            type="checkbox"
+                            checked={selectedEmployeesForHours.length === nonAdminEmployees.length && nonAdminEmployees.length > 0}
+                            onChange={toggleAllEmployees}
+                            className="accent-orange-500 rounded cursor-pointer"
+                          />
+                          <label className="text-xs text-zinc-400 cursor-pointer">Seleccionar todos</label>
+                          <span className="text-xs text-zinc-500 ml-auto">{nonAdminEmployees.length} empleados</span>
+                        </div>
+                        {nonAdminEmployees.map(emp => (
+                          <div key={emp.id} className="flex items-center gap-2 hover:bg-zinc-800/30 p-1 rounded">
+                            <input
+                              type="checkbox"
+                              checked={selectedEmployeesForHours.includes(emp.id)}
+                              onChange={() => toggleEmployeeSelection(emp.id)}
+                              className="accent-orange-500 rounded cursor-pointer"
+                            />
+                            <label className="text-xs text-zinc-300 cursor-pointer flex-1">
+                              {emp.name} <span className="text-zinc-500">({emp.id})</span>
+                            </label>
+                          </div>
+                        ))}
+                        <div className="pt-2 border-t border-zinc-800 flex justify-end">
+                          <button
+                            onClick={() => setShowEmployeeSelector(false)}
+                            className="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded text-[10px] font-bold transition-colors"
+                          >
+                            Cerrar
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
               {infoSemana.fechaInicio && (
                 <div className="flex justify-end">
-                  <div className={`px-3 py-1.5 rounded-full text-[10px] font-bold font-mono tracking-wider border uppercase ${infoSemana.estatusCorte === 'ACTIVA' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : 'bg-zinc-900 text-zinc-400 border-zinc-800'}`}>
+                  <div className={`px-3 py-1.5 rounded-full text-[10px] font-bold font-mono tracking-wider border uppercase ${
+                    infoSemana.estatusCorte === 'ACTIVA' 
+                      ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' 
+                      : 'bg-zinc-900 text-zinc-400 border-zinc-800'
+                  }`}>
                     {infoSemana.estatusCorte === 'ACTIVA'
-                      ? `En curso (Del ${formatDatePickerString(infoSemana.fechaInicio)} al ${formatDatePickerString(infoSemana.fechaFin)})`
-                      : `Congelada (Del ${formatDatePickerString(infoSemana.fechaInicio)} al ${formatDatePickerString(infoSemana.fechaFin)})`
+                      ? `Semana en curso (Del ${formatDatePickerString(infoSemana.fechaInicio)} al ${formatDatePickerString(infoSemana.fechaFin)})`
+                      : `Semana cerrada (Del ${formatDatePickerString(infoSemana.fechaInicio)} al ${formatDatePickerString(infoSemana.fechaFin)})`
                     }
                   </div>
                 </div>
@@ -1973,7 +2210,7 @@ function AdminPanel({ user, onLogout, apiUrl }) {
                 <div className="text-center py-12 text-zinc-500 font-medium text-sm animate-pulse">
                   Calculando registros matematicos y cargando balance...
                 </div>
-              ) : filteredHoursReport.length === 0 ? (
+              ) : filteredHoursReportWithSelection.length === 0 ? (
                 <div className="text-center py-12 text-zinc-500 font-medium text-sm">
                   No se encontraron marcas consolidadas que coincidan con los criterios de busqueda.
                 </div>
@@ -1990,13 +2227,13 @@ function AdminPanel({ user, onLogout, apiUrl }) {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-zinc-800/60 text-xs font-medium">
-                      {filteredHoursReport.map((emp) => {
+                      {filteredHoursReportWithSelection.map((emp) => {
                         let colorBadge = 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20';
-                        let mensajeBalance = `+${emp.horasExtra} hrs Extra`;
+                        let mensajeBalance = `+${decimalToHoursMinutes(emp.horasExtra)} hrs Extra`;
 
                         if (emp.balanceEstatus === 'FALTANTE') {
                           colorBadge = 'bg-rose-500/10 text-rose-400 border border-rose-500/20';
-                          mensajeBalance = `-${emp.horasFaltantes} hrs Faltan`;
+                          mensajeBalance = `-${decimalToHoursMinutes(emp.horasFaltantes)} hrs Faltan`;
                         } else if (emp.horasExtra === 0 && emp.horasFaltantes === 0) {
                           colorBadge = 'bg-amber-500/10 text-amber-500 border border-amber-500/20';
                           mensajeBalance = 'Jornada Exacta';
@@ -2006,8 +2243,8 @@ function AdminPanel({ user, onLogout, apiUrl }) {
                           <tr key={emp.id} className="hover:bg-zinc-800/30 transition-all">
                             <td className="py-3.5 px-4 font-mono text-zinc-500 uppercase">{emp.id}</td>
                             <td className="py-3.5 px-4 font-bold text-white">{emp.name}</td>
-                            <td className="py-3.5 px-4 text-center text-zinc-400 font-mono">{emp.horasEsperadas} hrs</td>
-                            <td className="py-3.5 px-4 text-center text-zinc-200 font-semibold font-mono">{emp.horasReales} hrs</td>
+                            <td className="py-3.5 px-4 text-center text-zinc-400 font-mono">{decimalToHoursMinutes(emp.horasEsperadas)}</td>
+                            <td className="py-3.5 px-4 text-center text-zinc-200 font-semibold font-mono">{decimalToHoursMinutes(emp.horasReales)}</td>
                             <td className="py-3.5 px-4 text-center">
                               <span className={`px-2.5 py-1 rounded text-[10px] font-bold uppercase tracking-wider ${colorBadge}`}>
                                 {mensajeBalance}
@@ -2023,15 +2260,12 @@ function AdminPanel({ user, onLogout, apiUrl }) {
             </div>
           </main>
         ) : (
-          // ==========================================================
-          // PESTAÑA: GENERAL, PENIEL, EMAR, EBEN-EZER
-          // ==========================================================
           <>
             {/* MÉTRICAS */}
             <section className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="bg-zinc-900 p-5 rounded-xl border border-zinc-800">
                 <p className="text-xs font-bold tracking-wider text-zinc-500 uppercase">Registros en Vista</p>
-                <h3 className="text-3xl font-black text-white mt-1">{allRecords.length}</h3>
+                <h3 className="text-3xl font-black text-white mt-1">{filteredRecords.length}</h3>
                 <p className="text-[10px] text-zinc-500 font-mono mt-1 uppercase">
                   Total: {totalRecords} registros
                 </p>
@@ -2080,6 +2314,60 @@ function AdminPanel({ user, onLogout, apiUrl }) {
                       <option value="SALIDA">Salida</option>
                     </select>
                   </div>
+                </div>
+
+                {/* Selector de empleados para Bitácora */}
+                <div className="relative">
+                  <label className="block text-xs font-bold tracking-wider text-zinc-400 mb-1 uppercase">
+                    Empleados
+                  </label>
+                  <button
+                    onClick={() => setShowRecordEmployeeSelector(!showRecordEmployeeSelector)}
+                    className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-white hover:border-orange-500 transition-colors flex items-center justify-between"
+                  >
+                    <span>
+                      {selectedEmployeesForRecords.length === 0 
+                        ? 'Todos los empleados' 
+                        : `${selectedEmployeesForRecords.length} seleccionados`}
+                    </span>
+                    <span className="text-zinc-500">{showRecordEmployeeSelector ? '▲' : '▼'}</span>
+                  </button>
+                  
+                  {showRecordEmployeeSelector && (
+                    <div className="absolute z-20 mt-1 w-full bg-zinc-900 border border-zinc-800 rounded-lg p-3 max-h-60 overflow-y-auto space-y-1 shadow-xl">
+                      <div className="flex items-center gap-2 pb-2 border-b border-zinc-800 sticky top-0 bg-zinc-900">
+                        <input
+                          type="checkbox"
+                          checked={selectedEmployeesForRecords.length === nonAdminEmployees.length && nonAdminEmployees.length > 0}
+                          onChange={toggleAllRecordEmployees}
+                          className="accent-orange-500 rounded cursor-pointer"
+                        />
+                        <label className="text-xs text-zinc-400 cursor-pointer">Seleccionar todos</label>
+                        <span className="text-xs text-zinc-500 ml-auto">{nonAdminEmployees.length} empleados</span>
+                      </div>
+                      {nonAdminEmployees.map(emp => (
+                        <div key={emp.id} className="flex items-center gap-2 hover:bg-zinc-800/30 p-1 rounded">
+                          <input
+                            type="checkbox"
+                            checked={selectedEmployeesForRecords.includes(emp.id)}
+                            onChange={() => toggleRecordEmployeeSelection(emp.id)}
+                            className="accent-orange-500 rounded cursor-pointer"
+                          />
+                          <label className="text-xs text-zinc-300 cursor-pointer flex-1">
+                            {emp.name} <span className="text-zinc-500">({emp.id})</span>
+                          </label>
+                        </div>
+                      ))}
+                      <div className="pt-2 border-t border-zinc-800 flex justify-end">
+                        <button
+                          onClick={() => setShowRecordEmployeeSelector(false)}
+                          className="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded text-[10px] font-bold transition-colors"
+                        >
+                          Cerrar
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 <div className="p-4 bg-zinc-950 rounded-lg border border-zinc-800/60 space-y-3">
@@ -2164,7 +2452,7 @@ function AdminPanel({ user, onLogout, apiUrl }) {
                   <h2 className="text-sm font-bold text-white uppercase tracking-wider">Bitacora de Registros de Asistencia</h2>
                 </div>
 
-                {!loading && allRecords.length > 0 && (
+                {!loading && filteredRecords.length > 0 && (
                   <button
                     onClick={handleExportToPDF}
                     className="flex items-center gap-2 px-4 py-2 bg-zinc-950 hover:bg-zinc-800 text-orange-400 hover:text-orange-300 border border-orange-900/60 rounded-lg text-xs font-bold transition-all uppercase tracking-wider shadow-inner"
@@ -2176,7 +2464,7 @@ function AdminPanel({ user, onLogout, apiUrl }) {
 
               {loading ? (
                 <div className="text-center py-12 text-zinc-500 font-medium text-sm animate-pulse">Consultando base de datos...</div>
-              ) : allRecords.length === 0 ? (
+              ) : filteredRecords.length === 0 ? (
                 <div className="text-center py-12 text-zinc-500 font-medium text-sm">No se encontraron registros de asistencia.</div>
               ) : (
                 <>
@@ -2193,13 +2481,14 @@ function AdminPanel({ user, onLogout, apiUrl }) {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-zinc-800/60 text-xs font-medium">
-                        {currentRecordsToDisplay.map((rec, idx) => {
+                        {filteredRecords.map((rec, idx) => {
                           const recordId = getValueByStrategy(rec, ["ID Registro", "ID_Registro", "id"], 0, '');
                           const empIdValue = getValueByStrategy(rec, ["ID Empleado", "ID_Empleado", "Empleado ID"], 1, 'N/A');
                           const dateValue = getValueByStrategy(rec, ["Fecha", "fecha"], 2, '--/--/----');
                           const timeValue = getValueByStrategy(rec, ["Hora", "hora"], 3, '--:--');
                           const movRaw = getValueByStrategy(rec, ["Movimiento", "movimiento"], 4, 'ENTRADA');
                           const storeValue = getValueByStrategy(rec, ["Sucursal"], 5, 'PENIEL');
+                          const esDescanso = esDiaDescanso(empIdValue, dateValue);
 
                           const targetEmpObj = employeesList.find(e => String(e.id).toUpperCase() === String(empIdValue).toUpperCase());
                           const empNameValue = targetEmpObj ? targetEmpObj.name : 'Personal Activo';
@@ -2212,7 +2501,14 @@ function AdminPanel({ user, onLogout, apiUrl }) {
 
                           return (
                             <tr key={recordId || idx} className="hover:bg-zinc-800/30 transition-all group">
-                              <td className="py-3.5 px-4 font-bold text-white">{empNameValue}</td>
+                              <td className="py-3.5 px-4 font-bold text-white">
+                                {empNameValue}
+                                {esDescanso && (
+                                  <span className="ml-2 px-1.5 py-0.5 bg-purple-500/20 text-purple-400 border border-purple-500/30 rounded text-[8px] font-bold uppercase">
+                                    Descanso trabajado
+                                  </span>
+                                )}
+                              </td>
                               <td className="py-3.5 px-4 font-mono text-zinc-500 uppercase">{empIdValue}</td>
                               <td className="py-3.5 px-4">
                                 <span className="px-2 py-0.5 bg-zinc-950 border border-zinc-800 rounded text-[10px] font-bold font-mono text-zinc-400 uppercase">
@@ -2323,7 +2619,7 @@ function AdminPanel({ user, onLogout, apiUrl }) {
                   <div className="p-4 bg-zinc-900 border-t border-zinc-800/80 flex flex-col sm:flex-row justify-between items-center gap-4 text-xs font-mono text-zinc-400">
                     <div>
                       Mostrando registros <span className="text-white font-bold">
-                        {allRecords.length > 0 ? (currentPage - 1) * recordsPerPage + 1 : 0}
+                        {filteredRecords.length > 0 ? (currentPage - 1) * recordsPerPage + 1 : 0}
                       </span> al{' '}
                       <span className="text-white font-bold">
                         {Math.min(currentPage * recordsPerPage, totalRecords)}
@@ -2374,7 +2670,6 @@ function AdminPanel({ user, onLogout, apiUrl }) {
       <ScheduleModal />
       <VacationModal />
       
-      {/* MODAL DE EMPLEADOS - Componente separado optimizado */}
       <EmployeeModal
         isOpen={showEmployeeModal}
         isAdding={isAddingEmployee}

@@ -32,24 +32,8 @@ function EmployeePanel({ user, onLogout, apiUrl }) {
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
 
-  // Estado para horas semanales - Optimizado con caché
-  const [weeklyHours, setWeeklyHours] = useState(() => {
-    // Intentar cargar desde caché al iniciar
-    const cached = sessionStorage.getItem(`hours_${user.id}`);
-    if (cached) {
-      try {
-        const data = JSON.parse(cached);
-        const lastLoad = sessionStorage.getItem(`hours_${user.id}_last`);
-        if (lastLoad && (Date.now() - parseInt(lastLoad) < 120000)) {
-          return data;
-        }
-      } catch (e) {
-        // Si hay error, ignorar caché
-      }
-    }
-    return null;
-  });
-  const [loadingHours, setLoadingHours] = useState(!weeklyHours);
+  const [weeklyHours, setWeeklyHours] = useState(null);
+  const [loadingHours, setLoadingHours] = useState(true);
 
   const rawLV = user?.rawLV || '10:00 - 19:00';
   const rawSab = user?.rawSab || '08:00 - 19:00';
@@ -62,57 +46,159 @@ function EmployeePanel({ user, onLogout, apiUrl }) {
                        (user?.vacations && user.vacations.status === 'ACTIVO');
 
   // ============================================================
+  // FUNCIÓN: CONVERTIR HORAS DECIMALES A FORMATO HH:MM
+  // ============================================================
+  const decimalToHoursMinutes = (decimalHours) => {
+    if (decimalHours === undefined || decimalHours === null || isNaN(decimalHours)) return '0:00';
+    const hours = Math.floor(decimalHours);
+    const minutes = Math.round((decimalHours - hours) * 60);
+    return `${hours}:${String(minutes).padStart(2, '0')}`;
+  };
+
+  // ============================================================
+  // FUNCIÓN: VERIFICAR SI UN DÍA ES DESCANSO PARA UN EMPLEADO
+  // ============================================================
+  const esDiaDescanso = (employeeId, fechaStr) => {
+    if (!employeeId || !fechaStr) return false;
+    
+    const targetEmp = user;
+    if (!targetEmp) return false;
+    
+    try {
+      const parts = fechaStr.split(/[-/]/);
+      let year, month, day;
+      if (parts[0].length === 4) {
+        [year, month, day] = parts;
+      } else {
+        [day, month, year] = parts;
+      }
+      const recordDate = new Date(parseInt(year), parseInt(month) - 1, parseInt(day));
+      if (isNaN(recordDate.getTime())) return false;
+      
+      const diaSemana = recordDate.getDay();
+      let horarioDia = '';
+      
+      switch(diaSemana) {
+        case 0: horarioDia = targetEmp.rawDom || 'DESCANSO'; break;
+        case 1: horarioDia = targetEmp.rawLun || 'DESCANSO'; break;
+        case 2: horarioDia = targetEmp.rawMar || 'DESCANSO'; break;
+        case 3: horarioDia = targetEmp.rawMie || 'DESCANSO'; break;
+        case 4: horarioDia = targetEmp.rawJue || 'DESCANSO'; break;
+        case 5: horarioDia = targetEmp.rawVie || 'DESCANSO'; break;
+        case 6: horarioDia = targetEmp.rawSab || 'DESCANSO'; break;
+        default: return false;
+      }
+      
+      return !horarioDia || horarioDia.toUpperCase().includes('DESCANSO') || horarioDia === '-';
+    } catch (e) {
+      return false;
+    }
+  };
+
+  // ============================================================
   // FUNCIÓN OPTIMIZADA: CARGAR HORAS DEL EMPLEADO
   // ============================================================
   const loadEmployeeHours = useCallback(async (forceRefresh = false) => {
-    // Si no es refresh y hay caché válido, usar caché
+    if (forceRefresh) {
+      console.log('🔄 Force refresh - limpiando caché');
+      sessionStorage.removeItem(`hours_${user.id}`);
+      sessionStorage.removeItem(`hours_${user.id}_last`);
+      const keys = Object.keys(sessionStorage);
+      keys.forEach(key => {
+        if (key.includes(`hours_${user.id}`)) {
+          sessionStorage.removeItem(key);
+        }
+      });
+    }
+    
     if (!forceRefresh) {
       const cached = sessionStorage.getItem(`hours_${user.id}`);
       const lastLoad = sessionStorage.getItem(`hours_${user.id}_last`);
       if (cached && lastLoad && (Date.now() - parseInt(lastLoad) < 120000)) {
         try {
           const data = JSON.parse(cached);
-          setWeeklyHours(data);
-          setLoadingHours(false);
-          return;
+          if (data && data.horasReales !== undefined) {
+            console.log('📦 Usando caché:', data);
+            setWeeklyHours(data);
+            setLoadingHours(false);
+            return;
+          }
         } catch (e) {
-          // Si hay error, continuar con carga normal
+          console.warn('Error al leer caché:', e);
         }
       }
     }
     
     setLoadingHours(true);
     try {
-      // Usar la NUEVA función específica para el empleado
-      const response = await fetch(
-        `${apiUrl}?action=GET_EMPLOYEE_WEEKLY_HOURS&employeeId=${user.id}&_cb=${new Date().getTime()}`
-      );
+      const cacheBuster = new Date().getTime();
+      const url = `${apiUrl}?action=GET_EMPLOYEE_WEEKLY_HOURS&employeeId=${user.id}&_cb=${cacheBuster}`;
+      console.log('📡 Cargando horas desde:', url);
+      
+      const response = await fetch(url);
       const data = await response.json();
       
-      if (data.success && data.employee) {
+      console.log('📡 Respuesta de horas:', data);
+      
+      if (data && data.success && data.employee) {
         const employeeData = data.employee;
-        setWeeklyHours(employeeData);
-        // Guardar en caché
-        sessionStorage.setItem(`hours_${user.id}`, JSON.stringify(employeeData));
+        const processedData = {
+          id: employeeData.id || user.id,
+          name: employeeData.name || user.name,
+          horasEsperadas: employeeData.horasEsperadas || 0,
+          horasReales: employeeData.horasReales || 0,
+          horasExtra: employeeData.horasExtra || 0,
+          horasFaltantes: employeeData.horasFaltantes || 0,
+          balanceEstatus: employeeData.balanceEstatus || 'COMPLETO'
+        };
+        
+        console.log('✅ Horas procesadas:', processedData);
+        setWeeklyHours(processedData);
+        
+        sessionStorage.setItem(`hours_${user.id}`, JSON.stringify(processedData));
         sessionStorage.setItem(`hours_${user.id}_last`, String(Date.now()));
       } else {
-        // Si falla, intentar con la función antigua como fallback
-        console.warn('Fallo GET_EMPLOYEE_WEEKLY_HOURS, usando fallback');
-        const fallbackResponse = await fetch(`${apiUrl}?action=GET_WEEKLY_HOURS&_cb=${new Date().getTime()}`);
-        const fallbackData = await fallbackResponse.json();
-        if (fallbackData.success && fallbackData.reporte) {
-          const myData = fallbackData.reporte.find(emp => emp.id.toUpperCase() === user.id.toUpperCase());
-          if (myData) {
-            setWeeklyHours(myData);
-            sessionStorage.setItem(`hours_${user.id}`, JSON.stringify(myData));
-            sessionStorage.setItem(`hours_${user.id}_last`, String(Date.now()));
-          }
+        console.warn('⚠️ Respuesta inválida de GET_EMPLOYEE_WEEKLY_HOURS:', data);
+        await loadHoursFallback();
+      }
+    } catch (err) {
+      console.error('❌ Error loading employee hours:', err);
+      await loadHoursFallback();
+    } finally {
+      setLoadingHours(false);
+    }
+  }, [apiUrl, user.id]);
+
+  // ============================================================
+  // FUNCIÓN DE FALLBACK PARA CARGAR HORAS
+  // ============================================================
+  const loadHoursFallback = useCallback(async () => {
+    try {
+      console.log('📡 Usando fallback GET_WEEKLY_HOURS');
+      const cacheBuster = new Date().getTime();
+      const response = await fetch(`${apiUrl}?action=GET_WEEKLY_HOURS&_cb=${cacheBuster}`);
+      const data = await response.json();
+      
+      if (data.success && data.reporte) {
+        const myData = data.reporte.find(emp => emp.id.toUpperCase() === user.id.toUpperCase());
+        if (myData) {
+          const processedData = {
+            id: myData.id || user.id,
+            name: myData.name || user.name,
+            horasEsperadas: myData.horasEsperadas || 0,
+            horasReales: myData.horasReales || 0,
+            horasExtra: myData.horasExtra || 0,
+            horasFaltantes: myData.horasFaltantes || 0,
+            balanceEstatus: myData.balanceEstatus || 'COMPLETO'
+          };
+          console.log('✅ Horas desde fallback:', processedData);
+          setWeeklyHours(processedData);
+          sessionStorage.setItem(`hours_${user.id}`, JSON.stringify(processedData));
+          sessionStorage.setItem(`hours_${user.id}_last`, String(Date.now()));
         }
       }
     } catch (err) {
-      console.error('Error loading employee hours:', err);
-    } finally {
-      setLoadingHours(false);
+      console.error('❌ Error en fallback:', err);
     }
   }, [apiUrl, user.id]);
 
@@ -123,7 +209,6 @@ function EmployeePanel({ user, onLogout, apiUrl }) {
     try {
       setLoadingTable(true);
       
-      // Usar la nueva API optimizada con paginación para este empleado
       const cacheBuster = new Date().getTime();
       const url = `${apiUrl}?action=GET_ADMIN_DATA_OPTIMIZED&_cb=${cacheBuster}`;
       
@@ -210,18 +295,21 @@ function EmployeePanel({ user, onLogout, apiUrl }) {
     else if (last === 'SALIDA') setCurrentStep('JORNADA_COMPLETA');
     else setCurrentStep('ENTRADA');
 
-    // CARGA EN PARALELO - Todas las llamadas simultáneas
     Promise.all([
       fetchEmployeeData(),
       loadEmployeeHours(),
       syncTodayStep(true)
     ]).then(() => {
-      // Todo cargado
+      console.log('✅ Carga inicial completada');
     }).catch((err) => {
       console.error('Error en carga inicial:', err);
     });
 
   }, [apiUrl, user.id]);
+
+  useEffect(() => {
+    console.log('📊 weeklyHours actualizado:', weeklyHours);
+  }, [weeklyHours]);
 
   // ============================================================
   // EFECTO: HORARIO DEL DÍA
@@ -298,7 +386,7 @@ function EmployeePanel({ user, onLogout, apiUrl }) {
   };
 
   // ============================================================
-  // HANDLER: ESCANEO EXITOSO - CON RECARGA OPTIMIZADA
+  // HANDLER: ESCANEO EXITOSO - CON IP (VALIDACIÓN POR RANGO)
   // ============================================================
   const handleScanSuccess = async (scannedJsonPayload) => {
     setShowScanner(false);
@@ -312,9 +400,10 @@ function EmployeePanel({ user, onLogout, apiUrl }) {
       const ipData = await ipResponse.json();
       if (ipData && ipData.ip) {
         detectedIp = String(ipData.ip).trim();
+        console.log('📡 IP detectada:', detectedIp);
       }
     } catch (ipErr) {
-      console.warn("Fallo en ipify o timeout. Se transmitirá como 'desconocida':", ipErr);
+      console.warn("Fallo en ipify o timeout:", ipErr);
     }
 
     try {
@@ -378,21 +467,22 @@ function EmployeePanel({ user, onLogout, apiUrl }) {
           isError: false 
         });
         
-        // ============================================================
-        // RECARGA OPTIMIZADA - Forzar recarga después del registro
-        // ============================================================
-        // Primero mostrar loading
         setLoadingHours(true);
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        console.log('🔃 Recargando datos después del registro...');
         
-        // Esperar un momento para que el backend procese y limpie caché
-        await new Promise(resolve => setTimeout(resolve, 1500));
-        
-        // Recargar en paralelo
         await Promise.all([
           fetchEmployeeData(),
-          loadEmployeeHours(true) // forceRefresh = true
+          loadEmployeeHours(true)
         ]);
-        // ============================================================
+        
+        console.log('✅ Datos recargados correctamente');
+        
+        const cached = sessionStorage.getItem(`hours_${user.id}`);
+        if (cached) {
+          const data = JSON.parse(cached);
+          console.log('📊 Horas después de recarga:', data);
+        }
         
       } else {
         const mensajeError = resData.error || resData.message || "El servidor no devolvió éxito.";
@@ -444,7 +534,7 @@ function EmployeePanel({ user, onLogout, apiUrl }) {
   });
 
   // ============================================================
-  // UTILITY: VERIFICAR RETARDO
+  // UTILITY: VERIFICAR RETARDO - TOLERANCIA DE 10 MINUTOS
   // ============================================================
   const getMovimientoConRetardo = (movimientoBase, fechaStr, horaStr) => {
     const movUpper = movimientoBase.toUpperCase().trim();
@@ -476,7 +566,7 @@ function EmployeePanel({ user, onLogout, apiUrl }) {
       const minutosRegistro = (hReg * 60) + mReg;
       const minutesConfig = (hConf * 60) + mConf;
 
-      if (minutosRegistro > minutesConfig) {
+      if (minutosRegistro > (minutesConfig + 10)) {
         return "Entrada con Retardo";
       }
     } catch (e) {
@@ -487,21 +577,18 @@ function EmployeePanel({ user, onLogout, apiUrl }) {
   };
 
   // ============================================================
-  // ESTILOS PARA HORAS - CORREGIDOS
+  // ESTILOS PARA HORAS
   // ============================================================
   const getHoursColor = () => {
     if (!weeklyHours) return 'text-zinc-500';
     const { horasReales, horasEsperadas } = weeklyHours;
     
-    // Si las horas reales son menores a las esperadas → ROJO (faltante)
     if (horasReales < horasEsperadas) {
       return 'text-rose-400';
     }
-    // Si las horas reales son mayores a las esperadas → VERDE (extra)
     if (horasReales > horasEsperadas) {
       return 'text-emerald-400';
     }
-    // Si son iguales → AMARILLO (exacta)
     return 'text-amber-400';
   };
 
@@ -509,15 +596,12 @@ function EmployeePanel({ user, onLogout, apiUrl }) {
     if (!weeklyHours) return 'bg-zinc-900/50 border-zinc-800/50';
     const { horasReales, horasEsperadas } = weeklyHours;
     
-    // Si las horas reales son menores a las esperadas → ROJO (faltante)
     if (horasReales < horasEsperadas) {
       return 'bg-rose-500/10 border-rose-500/20';
     }
-    // Si las horas reales son mayores a las esperadas → VERDE (extra)
     if (horasReales > horasEsperadas) {
       return 'bg-emerald-500/10 border-emerald-500/20';
     }
-    // Si son iguales → AMARILLO (exacta)
     return 'bg-amber-500/10 border-amber-500/20';
   };
 
@@ -525,15 +609,12 @@ function EmployeePanel({ user, onLogout, apiUrl }) {
     if (!weeklyHours) return 'Cargando...';
     const { horasReales, horasEsperadas } = weeklyHours;
     
-    // Si las horas reales son menores a las esperadas, es FALTANTE
     if (horasReales < horasEsperadas) {
       return 'Faltan Horas';
     }
-    // Si las horas reales son mayores a las esperadas, es EXTRA
     if (horasReales > horasEsperadas) {
       return 'Horas Extra';
     }
-    // Si son iguales, es Jornada Exacta
     return 'Jornada Exacta';
   };
 
@@ -598,7 +679,7 @@ function EmployeePanel({ user, onLogout, apiUrl }) {
           </div>
         </section>
 
-        {/* INDICADOR DE HORAS SEMANALES - Optimizado con caché y colores corregidos */}
+        {/* INDICADOR DE HORAS SEMANALES - CON FORMATO HH:MM */}
         {!isOnVacation && (
           <section className={`border rounded-xl p-4 md:p-5 shadow-xl ${loadingHours ? 'bg-zinc-900/50 border-zinc-800/50' : getHoursBgColor()}`}>
             {loadingHours ? (
@@ -611,37 +692,46 @@ function EmployeePanel({ user, onLogout, apiUrl }) {
                 <div className="text-center sm:text-left">
                   <p className="text-xs font-mono font-bold text-zinc-500 uppercase tracking-wider">Progreso Semanal</p>
                   <div className="flex items-center gap-3 mt-1 flex-wrap justify-center sm:justify-start">
-                    <span className="text-2xl md:text-3xl font-black text-white">{weeklyHours.horasReales?.toFixed(1) || '0.0'}h</span>
-                    <span className="text-sm text-zinc-500">/ {weeklyHours.horasEsperadas?.toFixed(1) || '0.0'}h</span>
+                    <span className="text-2xl md:text-3xl font-black text-white">
+                      {decimalToHoursMinutes(weeklyHours.horasReales)}h
+                    </span>
+                    <span className="text-sm text-zinc-500">/ {decimalToHoursMinutes(weeklyHours.horasEsperadas)}h</span>
                     <span className={`text-sm font-bold uppercase ${getHoursColor()}`}>
                       {getHoursStatusText()}
                     </span>
-                    {/* Botón de recarga manual */}
                     <button 
-                      onClick={() => loadEmployeeHours(true)}
-                      className="text-zinc-500 hover:text-orange-400 transition-colors ml-1"
+                      onClick={() => {
+                        console.log('🔄 Recarga manual de horas iniciada');
+                        loadEmployeeHours(true);
+                      }}
+                      className="text-zinc-400 hover:text-orange-400 transition-colors ml-1 p-1 rounded hover:bg-zinc-800"
                       title="Recargar progreso semanal"
+                      disabled={loadingHours}
                     >
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                      </svg>
+                      {loadingHours ? (
+                        <div className="w-4 h-4 border-2 border-orange-500 border-t-transparent rounded-full animate-spin" />
+                      ) : (
+                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                        </svg>
+                      )}
                     </button>
                   </div>
                 </div>
                 <div className="flex gap-4 text-xs font-mono">
                   <div>
                     <span className="text-zinc-500 block text-center">Esperadas</span>
-                    <span className="text-white font-bold block text-center">{weeklyHours.horasEsperadas?.toFixed(1) || '0.0'}h</span>
+                    <span className="text-white font-bold block text-center">{decimalToHoursMinutes(weeklyHours.horasEsperadas)}</span>
                   </div>
                   <div>
                     <span className="text-zinc-500 block text-center">Reales</span>
-                    <span className={`font-bold block text-center ${getHoursColor()}`}>{weeklyHours.horasReales?.toFixed(1) || '0.0'}h</span>
+                    <span className={`font-bold block text-center ${getHoursColor()}`}>{decimalToHoursMinutes(weeklyHours.horasReales)}</span>
                   </div>
                   <div>
                     <span className="text-zinc-500 block text-center">Balance</span>
                     <span className={`font-bold block text-center ${getHoursColor()}`}>
-                      {weeklyHours.horasExtra > 0 ? `+${weeklyHours.horasExtra.toFixed(1)}h` : 
-                       weeklyHours.horasFaltantes > 0 ? `-${weeklyHours.horasFaltantes.toFixed(1)}h` : '0h'}
+                      {weeklyHours.horasExtra > 0 ? `+${decimalToHoursMinutes(weeklyHours.horasExtra)}` : 
+                       weeklyHours.horasFaltantes > 0 ? `-${decimalToHoursMinutes(weeklyHours.horasFaltantes)}` : '0:00'}
                     </span>
                   </div>
                 </div>
@@ -729,7 +819,7 @@ function EmployeePanel({ user, onLogout, apiUrl }) {
           )}
         </div>
 
-        {/* MI HISTORIAL DE ASISTENCIAS */}
+        {/* MI HISTORIAL DE ASISTENCIAS - CON ETIQUETA "DESCANSO TRABAJADO" */}
         <section className="bg-zinc-900 rounded-xl border border-zinc-800 shadow-xl overflow-hidden space-y-3 md:space-y-4 p-4 md:p-5">
           <div className="border-b border-zinc-800 pb-3 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 md:gap-3">
             <div>
@@ -802,6 +892,8 @@ function EmployeePanel({ user, onLogout, apiUrl }) {
                     const isEdited = getValueByStrategy(rec, ["Auditado", "auditado"], 7, 'FALSE') === 'TRUE';
 
                     const movimientoFinal = getMovimientoConRetardo(movRaw, dateVal, timeVal);
+                    
+                    const isDescanso = esDiaDescanso(user.id, dateVal);
 
                     return (
                       <tr key={idx} className="hover:bg-zinc-800/20 transition-all">
@@ -823,6 +915,11 @@ function EmployeePanel({ user, onLogout, apiUrl }) {
                           }`}>
                             {movimientoFinal}
                           </span>
+                          {isDescanso && (
+                            <span className="ml-1 px-1.5 py-0.5 bg-purple-500/20 text-purple-400 border border-purple-500/30 rounded text-[8px] font-bold uppercase">
+                              Descanso trabajado
+                            </span>
+                          )}
                         </td>
                         <td className="py-2.5 md:py-3 px-2 md:px-3 text-right uppercase text-zinc-500 text-[10px] font-bold">{storeVal}</td>
                       </tr>
